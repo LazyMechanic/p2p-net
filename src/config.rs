@@ -1,0 +1,26 @@
+use clap::Clap;
+use std::net::SocketAddr;
+
+#[derive(Clap, Debug)]
+#[clap(version = "0.1", author = "Lazy Mechanic")]
+pub struct Config {
+    /// Period in seconds. How often to send messages
+    #[clap(long)]
+    pub period: i64,
+
+    /// Port on which to start client
+    #[clap(long)]
+    pub port: u16,
+
+    /// Another client address. Use if you want to connect to the network.
+    /// If omitted, then new network will be launched
+    #[clap(long)]
+    pub connect: Option<SocketAddr>,
+}
+
+impl Config {
+    pub fn parse_args() -> Config {
+        let cfg = Config::parse();
+        cfg
+    }
+}
