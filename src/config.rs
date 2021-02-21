@@ -5,8 +5,8 @@ use std::net::SocketAddr;
 #[clap(version = "0.1", author = "Lazy Mechanic")]
 pub struct Config {
     /// Period in seconds. How often to send messages
-    #[clap(long)]
-    pub period: i64,
+    #[clap(long, default_value = "10")]
+    pub period: u64,
 
     /// Port on which to start client
     #[clap(long)]
