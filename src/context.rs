@@ -1,7 +1,6 @@
 use crate::prelude::*;
 
 use std::collections::HashMap;
-use std::ops::DerefMut;
 use tokio_serde::formats::*;
 use tokio_util::codec::LengthDelimitedCodec;
 
@@ -78,7 +77,7 @@ impl Context {
         let peers = self.peers.read().await;
         let res = peers
             .iter()
-            .filter(|(&addr, peer)| peer.info.is_some())
+            .filter(|(_, peer)| peer.info.is_some())
             .map(|(&addr, peer)| (addr, peer.info.clone().unwrap()))
             .collect();
 
@@ -102,10 +101,7 @@ impl Context {
         let mut peers = self.peers.write().await;
 
         // Filter peers which not contains in `exclude_addrs`
-        for (_, peer) in peers
-            .iter_mut()
-            .filter(|(addr, peer)| **addr != exclude_addr)
-        {
+        for (_, peer) in peers.iter_mut().filter(|(addr, _)| **addr != exclude_addr) {
             if let Err(e) = self.send_impl(&mut peer.tx, msg.clone()).await {
                 log::error!("error occurred on send: {:?}", e)
             }

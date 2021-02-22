@@ -97,7 +97,7 @@ async fn handle_events(
                     }
                 }
             }
-            Event::AcceptConnection { mut socket, addr } => {
+            Event::AcceptConnection { socket, addr } => {
                 log::info!("accept new client: addr={}", addr);
 
                 // Add new peer and handle messages
@@ -119,7 +119,7 @@ async fn handle_events(
                 log::info!("connect: dest_addr={}", addr);
 
                 // Connect to network
-                let mut socket = match TcpStream::connect(addr).await {
+                let socket = match TcpStream::connect(addr).await {
                     Ok(s) => s,
                     Err(err) => {
                         log::error!("error occurred on connect: {}", err);
@@ -146,7 +146,7 @@ async fn handle_events(
 async fn handle_connection(
     ctx: Arc<Context>,
     event_tx: EventTx,
-    mut socket: TcpStream,
+    socket: TcpStream,
     addr: SocketAddr,
     info: Option<peer::Info>,
 ) -> anyhow::Result<()> {
@@ -161,7 +161,7 @@ async fn handle_connection(
             info,
         },
     )
-    .await;
+    .await?;
 
     let length_delimited_transport = LengthDelimitedCodec::builder().new_read(socket_rx);
 
@@ -274,6 +274,4 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             continue;
         }
     }
-
-    Ok(())
 }
