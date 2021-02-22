@@ -107,7 +107,14 @@ async fn handle_events(
                     log::error!("error occurred on handle connection: {}", err)
                 }
             }
-            Event::Disconnect(_) => todo!(),
+            Event::Disconnect(addr) => {
+                log::info!("disconnect: addr={}", addr);
+
+                if let Err(err) = ctx.disconnect(addr).await {
+                    log::error!("error occurred on disconnect: {}", err);
+                    continue;
+                }
+            }
             Event::Connect(addr) => {
                 log::info!("connect: dest_addr={}", addr);
 
@@ -127,8 +134,7 @@ async fn handle_events(
                         .await
                 {
                     log::error!("error occurred on handle connection: {}", err);
-                    ctx.exit().await;
-                    continue;
+                    std::process::exit(1);
                 }
             }
         }
@@ -184,47 +190,17 @@ async fn handle_connection(
                 }
                 Err(err) => {
                     log::error!("error occurred on deserialize message: {}", err);
-                    ctx.exit().await;
+
+                    let event = Event::Disconnect(addr);
+                    if let Err(err) = event_tx.send(event) {
+                        log::error!("error occurred on send event: {}", err);
+                    }
+
+                    return;
                 }
             }
         }
     });
-
-    Ok(())
-}
-
-async fn handle_connection_v2(
-    event_tx: EventTx,
-    socket_rx: SocketRx,
-    addr: SocketAddr,
-) -> anyhow::Result<()> {
-    let length_delimited_transport = LengthDelimitedCodec::builder().new_read(socket_rx);
-
-    let mut deserializer = tokio_serde::SymmetricallyFramed::new(
-        length_delimited_transport,
-        SymmetricalJson::<Message>::default(),
-    );
-
-    while let Some(msg) = deserializer.next().await {
-        match msg {
-            Ok(msg) => {
-                let event = match msg {
-                    Message::Text(msg) => Event::RecvText { from: addr, msg },
-                    Message::NetworkState(msg) => Event::RecvNetworkState(msg),
-                    Message::NewConnection(msg) => Event::RecvNewConnection(msg),
-                    Message::ConnectionInfo(msg) => Event::RecvConnectionInfo { from: addr, msg },
-                };
-
-                if let Err(err) = event_tx.send(event) {
-                    log::error!("error occurred on send event: {:?}", err);
-                    continue;
-                }
-            }
-            Err(err) => {
-                log::error!("error occurred on deserialize message: {:?}", err);
-            }
-        }
-    }
 
     Ok(())
 }
@@ -268,7 +244,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
         // Send info
         let event = Event::SendMessage {
-            to: addr,
+            to: connection_addr,
             msg: Message::ConnectionInfo(message::ConnectionInfo { port: ctx.port() }),
         };
         event_tx.send(event)?;
@@ -286,7 +262,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     });
 
     // Accept connects
-    while ctx.is_running().await {
+    loop {
         let (socket, socket_addr) = listener.accept().await?;
 
         let event = Event::AcceptConnection {

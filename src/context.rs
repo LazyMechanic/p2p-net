@@ -8,7 +8,6 @@ use tokio_util::codec::LengthDelimitedCodec;
 type Peers = HashMap<SocketAddr, Peer>;
 
 pub struct Context {
-    is_running: Mutex<bool>,
     port: u16,
     peers: RwLock<Peers>,
     sleep_duration: Duration,
@@ -17,7 +16,6 @@ pub struct Context {
 impl Context {
     pub fn new(port: u16, period: u64) -> Context {
         Context {
-            is_running: Mutex::new(true),
             port,
             peers: Default::default(),
             sleep_duration: Duration::from_secs(period),
@@ -30,17 +28,6 @@ impl Context {
 
     pub fn sleep_duration(&self) -> Duration {
         self.sleep_duration
-    }
-
-    pub async fn exit(&self) {
-        let mut is_running = self.is_running.lock().await;
-        *is_running = false;
-
-        log::debug!("exit, is_running={}", is_running);
-    }
-
-    pub async fn is_running(&self) -> bool {
-        *self.is_running.lock().await
     }
 
     pub async fn add_peer(&self, addr: SocketAddr, peer: Peer) -> anyhow::Result<()> {
@@ -61,14 +48,23 @@ impl Context {
         addr: SocketAddr,
         info: Option<peer::Info>,
     ) -> anyhow::Result<()> {
-        log::debug!("update peer info: addr={}, info={:?}", addr, info);
-
         let mut peers = self.peers.write().await;
         let peer = peers
             .get_mut(&addr)
             .ok_or_else(|| anyhow!(format!("peer with addr={} not found", addr)))?;
 
         peer.info = info;
+
+        Ok(())
+    }
+
+    pub async fn disconnect(&self, addr: SocketAddr) -> anyhow::Result<()> {
+        let mut peers = self.peers.write().await;
+        if !peers.contains_key(&addr) {
+            return Err(anyhow!(format!("peer with addr={} not found", addr)));
+        }
+
+        peers.remove(&addr);
 
         Ok(())
     }
