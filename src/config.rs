@@ -20,7 +20,6 @@ pub struct Config {
 
 impl Config {
     pub fn parse_args() -> Config {
-        let cfg = Config::parse();
-        cfg
+        Config::parse()
     }
 }

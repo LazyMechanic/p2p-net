@@ -1,10 +1,12 @@
-mod config;
-mod message;
-mod server;
+pub mod config;
+pub mod context;
+pub mod event;
+pub mod message;
+pub mod peer;
+pub mod prelude;
+pub mod server;
 
 use config::Config;
-use std::net::SocketAddr;
-use tokio::net::{TcpListener, TcpStream};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

@@ -1,112 +1,303 @@
-use crate::config::Config;
-use crate::message::Message;
-use futures::prelude::*;
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use tokio::io::AsyncWriteExt;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, RwLock};
-use tokio::time::Duration;
-use tokio_util::codec::length_delimited::Builder;
-use tokio_util::codec::{Decoder, Framed, LengthDelimitedCodec, LinesCodec};
+use crate::prelude::*;
 
-struct Context {
-    pub addr: SocketAddr,
-    pub connections: RwLock<HashMap<SocketAddr, OwnedWriteHalf>>,
-    pub period: Duration,
-}
+use tokio_serde::formats::*;
+use tokio_util::codec::LengthDelimitedCodec;
 
-impl Context {
-    pub fn new(addr: SocketAddr, period: u64) -> Context {
-        Context {
-            addr,
-            connections: Default::default(),
-            period: Duration::from_secs(period),
-        }
-    }
+async fn handle_events(
+    ctx: Arc<Context>,
+    event_tx: EventTx,
+    mut event_rx: EventRx,
+) -> anyhow::Result<()> {
+    while let Some(event) = event_rx.recv().await {
+        match event {
+            Event::BroadcastMessage(msg) => {
+                if ctx.has_peers().await {
+                    log::info!("broadcast message: msg={:?}", msg);
+                    ctx.broadcast(msg).await;
+                }
+            }
+            Event::BroadcastWithExcludeMessage { exclude, msg } => {
+                if ctx.has_peers().await {
+                    log::info!("broadcast message: msg={:?}", msg);
+                    ctx.broadcast_with_exclude(msg, exclude).await;
+                }
+            }
+            Event::SendMessage { to, msg } => {
+                log::info!("send message: to={}, msg={:?}", to, msg);
+                if let Err(err) = ctx.send(to, msg).await {
+                    log::error!("error occurred on send: {}", err);
+                }
+            }
+            Event::RecvText { from, msg } => {
+                log::info!("received text: from={}, msg={:?}", from, msg)
+            }
+            Event::RecvConnectionInfo { from, msg } => {
+                log::info!("received connection info: from={} msg={:?}", from, msg);
 
-    pub async fn insert_connection(self: &Arc<Self>, socket: TcpStream, addr: SocketAddr) {
-        // TODO: send connected event to others
+                // Send network state
+                let event = Event::SendMessage {
+                    to: from,
+                    msg: Message::NetworkState(message::NetworkState {
+                        peers: ctx.network_state().await,
+                    }),
+                };
+                if let Err(err) = event_tx.send(event) {
+                    log::error!("error occurred on send event: {}", err);
+                    continue;
+                }
 
-        let (rx, tx) = socket.into_split();
+                // Update peer info
+                let event = Event::UpdatePeerInfo {
+                    addr: from,
+                    msg: msg.clone(),
+                };
+                if let Err(err) = event_tx.send(event) {
+                    log::error!("error occurred on send event: {}", err);
+                    continue;
+                }
+            }
+            Event::UpdatePeerInfo { addr, msg } => {
+                log::info!("update peer info: addr={}, msg={:?}", addr, msg);
 
-        log::info!("connected: addr={}", addr);
+                if let Err(err) = ctx
+                    .update_peer_info(addr, Some(peer::Info { port: msg.port }))
+                    .await
+                {
+                    log::error!("error occurred on update peer info: {}", err);
+                    continue;
+                }
+            }
+            Event::RecvNewConnection(msg) => {
+                log::info!("received new connection: addr={}", msg.addr);
 
-        // Add new client
-        self.connections.write().await.insert(addr, tx);
-
-        // Process
-        tokio::spawn(process(rx, addr, Arc::clone(self)));
-    }
-}
-
-fn codec_builder() -> Builder {
-    let mut builder = LengthDelimitedCodec::builder();
-    builder.length_field_length(8);
-
-    builder
-}
-
-async fn process(mut rx: OwnedReadHalf, addr: SocketAddr, ctx: Arc<Context>) {
-    let mut framed_read = codec_builder().new_read(rx);
-
-    while let Some(buf) = framed_read.next().await {
-        match buf {
-            Ok(buf) => {
-                let msg = match Message::try_from_bytes(&buf.as_ref()[8..]) {
-                    Ok(msg) => msg,
-                    Err(e) => {
-                        log::error!("{:?}", e);
+                let socket = match TcpStream::connect(msg.addr).await {
+                    Ok(s) => s,
+                    Err(err) => {
+                        log::error!("error occurred on connect: {}", err);
                         continue;
                     }
                 };
 
-                log::info!("received: addr={}, msg={:?}", addr, msg);
+                if let Err(err) =
+                    handle_connection(Arc::clone(&ctx), event_tx.clone(), socket, msg.addr, None)
+                        .await
+                {
+                    log::error!("error occurred on handle connection: {}", err)
+                }
             }
-            Err(e) => {
-                log::error!("{:?}", e);
-                return;
+            Event::RecvNetworkState(msg) => {
+                log::info!("received network state: size={}", msg.peers.len());
+                log::debug!("state: {:?}", msg);
+
+                for (addr, info) in msg.peers {
+                    let event = Event::Connect(SocketAddr::new(addr.ip(), info.port));
+                    if let Err(err) = event_tx.send(event) {
+                        log::error!("error occurred on send event: {}", err);
+                        continue;
+                    }
+                }
+            }
+            Event::AcceptConnection { mut socket, addr } => {
+                log::info!("accept new client: addr={}", addr);
+
+                // Add new peer and handle messages
+                if let Err(err) =
+                    handle_connection(Arc::clone(&ctx), event_tx.clone(), socket, addr, None).await
+                {
+                    log::error!("error occurred on handle connection: {}", err)
+                }
+            }
+            Event::Disconnect(_) => todo!(),
+            Event::Connect(addr) => {
+                log::info!("connect: dest_addr={}", addr);
+
+                // Connect to network
+                let mut socket = match TcpStream::connect(addr).await {
+                    Ok(s) => s,
+                    Err(err) => {
+                        log::error!("error occurred on connect: {}", err);
+                        continue;
+                    }
+                };
+
+                // Add new peer and handle messages
+                let info = peer::Info { port: addr.port() };
+                if let Err(err) =
+                    handle_connection(Arc::clone(&ctx), event_tx.clone(), socket, addr, Some(info))
+                        .await
+                {
+                    log::error!("error occurred on handle connection: {}", err);
+                    ctx.exit().await;
+                    continue;
+                }
             }
         }
     }
+
+    Ok(())
 }
 
-async fn write_random_message(ctx: Arc<Context>) {
-    loop {
-        let msg = Message::with_random_text();
+async fn handle_connection(
+    ctx: Arc<Context>,
+    event_tx: EventTx,
+    mut socket: TcpStream,
+    addr: SocketAddr,
+    info: Option<peer::Info>,
+) -> anyhow::Result<()> {
+    // Split socket to RX and TX
+    let (socket_rx, socket_tx) = socket.into_split();
 
-        for (addr, tx) in ctx.connections.write().await.iter_mut() {
-            let mut framed_write = codec_builder().new_write(tx);
+    // Add new peer without info
+    ctx.add_peer(
+        addr,
+        Peer {
+            tx: socket_tx,
+            info,
+        },
+    )
+    .await;
 
-            log::info!("sended: addr={}, msg={:?}", ctx.addr, msg);
+    let length_delimited_transport = LengthDelimitedCodec::builder().new_read(socket_rx);
 
-            let b = bytes::Bytes::from(msg.to_bytes());
-            if let Err(e) = framed_write.send(b).await {
-                log::error!("error on send: {:?}", e);
-                // TODO: remove client
+    let mut deserializer = tokio_serde::SymmetricallyFramed::new(
+        length_delimited_transport,
+        SymmetricalJson::<Message>::default(),
+    );
+
+    tokio::spawn(async move {
+        while let Some(msg) = deserializer.next().await {
+            match msg {
+                Ok(msg) => {
+                    let event = match msg {
+                        Message::Text(msg) => Event::RecvText { from: addr, msg },
+                        Message::NetworkState(msg) => Event::RecvNetworkState(msg),
+                        Message::NewConnection(msg) => Event::RecvNewConnection(msg),
+                        Message::ConnectionInfo(msg) => {
+                            Event::RecvConnectionInfo { from: addr, msg }
+                        }
+                    };
+
+                    if let Err(err) = event_tx.send(event) {
+                        log::error!("error occurred on send event: {}", err);
+                        continue;
+                    }
+                }
+                Err(err) => {
+                    log::error!("error occurred on deserialize message: {}", err);
+                    ctx.exit().await;
+                }
             }
         }
+    });
 
-        tokio::time::sleep(ctx.period).await;
+    Ok(())
+}
+
+async fn handle_connection_v2(
+    event_tx: EventTx,
+    socket_rx: SocketRx,
+    addr: SocketAddr,
+) -> anyhow::Result<()> {
+    let length_delimited_transport = LengthDelimitedCodec::builder().new_read(socket_rx);
+
+    let mut deserializer = tokio_serde::SymmetricallyFramed::new(
+        length_delimited_transport,
+        SymmetricalJson::<Message>::default(),
+    );
+
+    while let Some(msg) = deserializer.next().await {
+        match msg {
+            Ok(msg) => {
+                let event = match msg {
+                    Message::Text(msg) => Event::RecvText { from: addr, msg },
+                    Message::NetworkState(msg) => Event::RecvNetworkState(msg),
+                    Message::NewConnection(msg) => Event::RecvNewConnection(msg),
+                    Message::ConnectionInfo(msg) => Event::RecvConnectionInfo { from: addr, msg },
+                };
+
+                if let Err(err) = event_tx.send(event) {
+                    log::error!("error occurred on send event: {:?}", err);
+                    continue;
+                }
+            }
+            Err(err) => {
+                log::error!("error occurred on deserialize message: {:?}", err);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn write(event_tx: EventTx, sleep_duration: Duration) -> anyhow::Result<()> {
+    loop {
+        let msg_inner = message::Text::with_random_text();
+        let event = Event::BroadcastMessage(Message::Text(msg_inner));
+
+        if let Err(err) = event_tx.send(event) {
+            log::error!("error occurred on broadcast message: {:?}", err)
+        }
+
+        tokio::time::sleep(sleep_duration).await;
     }
 }
 
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
-    let addr = format!("0.0.0.0:{}", cfg.port).parse::<SocketAddr>()?;
-    let listener = TcpListener::bind(addr).await?;
-    let ctx = Arc::new(Context::new(addr, cfg.period));
+    let listing_addr = format!("0.0.0.0:{}", cfg.port).parse::<SocketAddr>()?;
+    let listener = TcpListener::bind(listing_addr).await?;
+    let ctx = Arc::new(Context::new(cfg.port, cfg.period));
 
+    let (event_tx, event_rx): (EventTx, EventRx) = mpsc::unbounded_channel();
+
+    // Start handling events
+    tokio::spawn({
+        let ctx = Arc::clone(&ctx);
+        let event_tx = event_tx.clone();
+        async move {
+            if let Err(err) = handle_events(ctx, event_tx, event_rx).await {
+                log::error!("error occurred on handle events: {:?}", err)
+            }
+        }
+    });
+
+    // Connect to another network
     if let Some(connection_addr) = cfg.connect {
-        let socket = TcpStream::connect(connection_addr).await?;
-        ctx.insert_connection(socket, connection_addr).await;
+        // Connect
+        let event = Event::Connect(connection_addr);
+        event_tx.send(event)?;
+
+        // Send info
+        let event = Event::SendMessage {
+            to: addr,
+            msg: Message::ConnectionInfo(message::ConnectionInfo { port: ctx.port() }),
+        };
+        event_tx.send(event)?;
     };
 
-    tokio::spawn(write_random_message(Arc::clone(&ctx)));
+    // Broadcast to peers
+    tokio::spawn({
+        let ctx = Arc::clone(&ctx);
+        let event_tx = event_tx.clone();
+        async move {
+            if let Err(err) = write(event_tx, ctx.sleep_duration()).await {
+                log::error!("error occurred on write: {:?}", err)
+            }
+        }
+    });
 
-    loop {
+    // Accept connects
+    while ctx.is_running().await {
         let (socket, socket_addr) = listener.accept().await?;
-        ctx.insert_connection(socket, socket_addr).await;
+
+        let event = Event::AcceptConnection {
+            socket,
+            addr: socket_addr,
+        };
+        if let Err(err) = event_tx.send(event) {
+            log::error!("error occurred on connect: {:?}", err);
+            continue;
+        }
     }
+
+    Ok(())
 }
