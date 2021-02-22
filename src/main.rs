@@ -25,7 +25,7 @@ async fn run() -> anyhow::Result<()> {
 }
 
 fn init_logger() {
-    let log_filters = std::env::var("RUST_LOG").unwrap_or_default();
+    let log_filters = std::env::var("RUST_LOG").unwrap_or("info".into());
 
     env_logger::Builder::new()
         .parse_filters(&log_filters)
