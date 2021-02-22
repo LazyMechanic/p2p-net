@@ -38,8 +38,8 @@ OPTIONS:
 2021-02-22T23:09:34 [INFO] - start with config=Config { period: 5, port: 8080, connect: None }
 
 # 2) Start second client
-> p2p-net --port 8081 --period 10 --connect 127.0.0.1:8080
-2021-02-22T23:11:11 [INFO] - start with config=Config { period: 5, port: 8081, connect: Some(127.0.0.1:8080) }
+> p2p-net --port 8081 --period 7 --connect 127.0.0.1:8080
+2021-02-22T23:11:11 [INFO] - start with config=Config { period: 7, port: 8081, connect: Some(127.0.0.1:8080) }
 ```
 
 First client logs:
@@ -55,7 +55,7 @@ First client logs:
 
 Second client logs:
 ```shell
-2021-02-22T23:11:11 [INFO] - start with config=Config { period: 5, port: 8081, connect: Some(127.0.0.1:8080) }
+2021-02-22T23:11:11 [INFO] - start with config=Config { period: 7, port: 8081, connect: Some(127.0.0.1:8080) }
 2021-02-22T23:11:11 [INFO] - connect: dest_addr=127.0.0.1:8080
 2021-02-22T23:11:11 [INFO] - send message: to=127.0.0.1:8080, msg=ConnectionInfo(ConnectionInfo { port: 8081 })
 2021-02-22T23:11:11 [INFO] - broadcast message: msg=Text(Text { text: "9BvisA3WBlQWCvmZqgeFu4OpP1wxpr" })
